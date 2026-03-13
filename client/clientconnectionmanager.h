@@ -99,6 +99,12 @@ public slots:
      */
     QMainWindow *createMainWindow();
 
+    /*! Initialize all tool UIs and models without creating the main window.
+     *  Call this after ready() to ensure ObjectInspectorTree, property model, etc.
+     *  are available for programmatic use (e.g. property read/write).
+     */
+    void ensureToolsInitialized();
+
     /*! Standard persistent connection error handler.
      *  @see persistentConnectionError()
      */

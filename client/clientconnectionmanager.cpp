@@ -226,6 +226,16 @@ QMainWindow *ClientConnectionManager::createMainWindow()
     return m_mainWindow;
 }
 
+void ClientConnectionManager::ensureToolsInitialized()
+{
+    if (!m_toolManager || !m_toolManager->isToolListLoaded())
+        return;
+    for (int i = 0; i < m_toolManager->tools().size(); ++i) {
+        if (m_toolManager->tools().at(i).isEnabled())
+            m_toolManager->widgetForIndex(i);
+    }
+}
+
 void ClientConnectionManager::transientConnectionError()
 {
     if (m_connectionTimeout.elapsed() < 60 * 1000) {
