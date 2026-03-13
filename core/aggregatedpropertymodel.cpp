@@ -30,6 +30,8 @@
 #include <QDebug>
 #include <QMetaEnum>
 
+#include <algorithm>
+
 using namespace GammaRay;
 
 
@@ -304,7 +306,7 @@ int AggregatedPropertyModel::rowCount(const QModelIndex &parent) const
         }
     }
 
-    if (siblings.isEmpty())
+    if (siblings.empty())
         return 0;
 
     auto childAdaptor = siblings.at(parent.row());
@@ -335,7 +337,10 @@ QModelIndex AggregatedPropertyModel::parent(const QModelIndex &child) const
         return {};
 
     auto parentAdaptor = childAdaptor->parentAdaptor();
-    return createIndex(m_parentChildrenMap.at(parentAdaptor).indexOf(childAdaptor), 0, parentAdaptor);
+    const auto &vec = m_parentChildrenMap.at(parentAdaptor);
+    const auto it = std::find(vec.begin(), vec.end(), childAdaptor);
+    Q_ASSERT(it != vec.end());
+    return createIndex(std::distance(vec.begin(), it), 0, parentAdaptor);
 }
 
 QModelIndex AggregatedPropertyModel::index(int row, int column, const QModelIndex &parent) const
@@ -360,11 +365,16 @@ void AggregatedPropertyModel::addPropertyAdaptor(PropertyAdaptor *adaptor) const
 {
     if (!adaptor)
         return;
+    if (m_parentChildrenMap.find(adaptor) != m_parentChildrenMap.cend())
+        return;  // 防止重复添加导致 Qt6 QVector isMutable 断言
 
-    m_parentChildrenMap.emplace(adaptor, QVector<PropertyAdaptor *>(adaptor->count()));
+    const int count = std::max(0, adaptor->count());  // 负值转为 size_t 会触发 std::length_error
+    m_parentChildrenMap.emplace(adaptor, std::vector<PropertyAdaptor *>(static_cast<size_t>(count), nullptr));
+    // propertyAdded/Removed 用 QueuedConnection：adaptor 初始化时可能同步发射，导致重入 rowCount，
+    // 在修改 m_parentChildrenMap 的 QVector 时触发 Qt6 QVector isMutable 断言
     connect(adaptor, &PropertyAdaptor::propertyChanged, this, &AggregatedPropertyModel::propertyChanged);
-    connect(adaptor, &PropertyAdaptor::propertyAdded, this, &AggregatedPropertyModel::propertyAdded);
-    connect(adaptor, &PropertyAdaptor::propertyRemoved, this, &AggregatedPropertyModel::propertyRemoved);
+    connect(adaptor, &PropertyAdaptor::propertyAdded, this, &AggregatedPropertyModel::propertyAdded, Qt::QueuedConnection);
+    connect(adaptor, &PropertyAdaptor::propertyRemoved, this, &AggregatedPropertyModel::propertyRemoved, Qt::QueuedConnection);
 }
 
 void AggregatedPropertyModel::propertyChanged(int first, int last)
@@ -393,10 +403,14 @@ void AggregatedPropertyModel::propertyAdded(int first, int last)
     auto idx = createIndex(first, 0, adaptor);
     beginInsertRows(idx.parent(), first, last);
     auto &children = m_parentChildrenMap[adaptor];
-    if (first >= children.size())
-        children.resize(last + 1);
-    else
-        children.insert(first, last - first + 1, nullptr);
+    if (first >= 0 && last >= first) {
+        const size_t newSize = static_cast<size_t>(last + 1);
+        const size_t insertCount = static_cast<size_t>(last - first + 1);
+        if (first >= static_cast<int>(children.size()))
+            children.resize(newSize);
+        else
+            children.insert(children.begin() + first, insertCount, nullptr);
+    }
     endInsertRows();
 }
 
@@ -413,7 +427,7 @@ void AggregatedPropertyModel::propertyRemoved(int first, int last)
     auto idx = createIndex(first, 0, adaptor);
     beginRemoveRows(idx.parent(), first, last);
     auto &children = m_parentChildrenMap[adaptor];
-    children.remove(first, last - first + 1);
+    children.erase(children.begin() + first, children.begin() + last + 1);
     endRemoveRows();
 }
 
@@ -437,7 +451,10 @@ void AggregatedPropertyModel::objectInvalidated(PropertyAdaptor *adaptor)
     auto parentAdaptor = adaptor->parentAdaptor();
     Q_ASSERT(parentAdaptor);
     Q_ASSERT(m_parentChildrenMap.find(parentAdaptor) != m_parentChildrenMap.cend());
-    reloadSubTree(parentAdaptor, m_parentChildrenMap.at(parentAdaptor).indexOf(adaptor));
+    const auto &vec = m_parentChildrenMap.at(parentAdaptor);
+    const auto it = std::find(vec.begin(), vec.end(), adaptor);
+    Q_ASSERT(it != vec.end());
+    reloadSubTree(parentAdaptor, std::distance(vec.begin(), it));
 }
 
 bool AggregatedPropertyModel::hasLoop(PropertyAdaptor *adaptor, const QVariant &v)
@@ -514,8 +531,10 @@ bool AggregatedPropertyModel::isParentEditable(PropertyAdaptor *adaptor) const
 
     // we need all value types along the way to be writable
     if (adaptor->object().isValueType()) {
-        const auto row = m_parentChildrenMap.at(parentAdaptor).indexOf(adaptor);
-        Q_ASSERT(row >= 0);
+        const auto &vec = m_parentChildrenMap.at(parentAdaptor);
+        const auto it = std::find(vec.begin(), vec.end(), adaptor);
+        Q_ASSERT(it != vec.end());
+        const auto row = std::distance(vec.begin(), it);
 
         const auto pd = parentAdaptor->propertyData(row);
         if ((pd.accessFlags() & PropertyData::Writable) == 0)
@@ -532,8 +551,10 @@ void AggregatedPropertyModel::propagateWrite(GammaRay::PropertyAdaptor *adaptor)
         return;
 
     if (adaptor->object().isValueType()) {
-        const auto row = m_parentChildrenMap.at(parentAdaptor).indexOf(adaptor);
-        Q_ASSERT(row >= 0);
+        const auto &vec = m_parentChildrenMap.at(parentAdaptor);
+        const auto it = std::find(vec.begin(), vec.end(), adaptor);
+        Q_ASSERT(it != vec.end());
+        const auto row = std::distance(vec.begin(), it);
 
         parentAdaptor->writeProperty(row, adaptor->object().variant());
     }
